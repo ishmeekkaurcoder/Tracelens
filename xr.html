@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TraceLens XR – Mixed Reality Tracing</title>
+<style>
+:root{--ink:#14151a;--paper:#f7f4ee;--accent:#ff5a36}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--paper);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+#home{min-height:100%;display:grid;place-items:center;padding:32px}
+.card{max-width:720px;width:100%;display:grid;gap:20px}
+.brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:22px}
+.brand i{width:40px;height:40px;border-radius:12px;background:var(--ink);position:relative;display:block}
+.brand i::after{content:"";position:absolute;inset:11px;border:3px solid var(--accent);border-radius:3px;transform:skewY(-12deg)}
+h1{font-size:46px;line-height:1.05}
+h1 em{font-style:normal;color:var(--accent)}
+p{font-size:18px;line-height:1.5;opacity:.8}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+button,.file{border:0;border-radius:16px;min-height:60px;padding:16px 24px;font:600 19px system-ui,sans-serif;cursor:pointer;background:var(--ink);color:var(--paper)}
+.ghost{background:transparent;color:var(--ink);outline:2px solid var(--ink)}
+.file{background:#fff;color:var(--ink);outline:2px dashed #999;display:inline-flex;align-items:center}
+#file{display:none}
+#thumbs{display:flex;gap:10px;flex-wrap:wrap}
+#thumbs canvas{width:96px;height:72px;border-radius:10px;background:#fff;object-fit:contain;outline:3px solid transparent;cursor:pointer}
+#thumbs canvas.on{outline-color:var(--accent)}
+#note{font-size:15px;min-height:22px;color:#a4361c}
+.keys{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:15px;background:#fff;border-radius:16px;padding:18px 20px}
+.keys b{white-space:nowrap}
+#gl{position:fixed;inset:0;display:none}
+#back{position:fixed;top:16px;left:16px;display:none;z-index:5;min-height:48px;padding:10px 18px;font-size:16px}
+</style>
+</head>
+<body>
+<section id="home"><div class="card">
+  <div class="brand"><i></i>TraceLens XR</div>
+  <h1>Pin any picture onto your <em>real wall</em> and trace it.</h1>
+  <p>A mixed-reality tracing tool for Meta Quest. You see your room through passthrough, place an artwork on a wall or table, scale it, lock it, and draw over it with a real pencil or brush.</p>
+  <div id="thumbs"></div>
+  <div class="row">
+    <label class="file" for="file">+ Add your own images</label>
+    <input type="file" id="file" accept="image/*" multiple>
+  </div>
+  <div class="row">
+    <button id="enter">Enter AR</button>
+    <button id="preview" class="ghost">Preview on screen</button>
+  </div>
+  <div id="note"></div>
+  <div class="keys">
+    <b>Right trigger</b><span>Place the picture where you point (wall or table) / press menu buttons</span>
+    <b>Grip</b><span>Grab and move · both grips: spread hands to scale</span>
+    <b>A</b><span>Pin / unpin (locks the picture in place)</span>
+    <b>B</b><span>Hide / show the picture</span>
+    <b>Right stick</b><span>Up/down: opacity · left/right: rotate</span>
+    <b>Left stick</b><span>Deform: stretch width / height</span>
+    <b>X / Y</b><span>Outline mode / next artwork</span>
+    <b>Left stick click</b><span>Show / hide the menu on your left hand</span>
+  </div>
+</div></section>
+<canvas id="gl"></canvas>
+<button id="back" class="ghost">Back</button>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+const $ = id => document.getElementById(id);
+const S = { idx: 0, opacity: .6, outline: false, grid: false, flip: false, pinned: false, hidden: false,
+            menu: true, size: .7, ax: 1, ay: 1, roll: 0, msg: 'Point at a wall and pull the trigger' };
+
+/* ================= artworks ================= */
+const arts = [];
+function addArt(name, src){ arts.push({ name, src, W: 0, H: 0, outline: null }); }
+
+function sampleBotanical(){
+  const c = document.createElement('canvas'); c.width = 900; c.height = 1100; const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 900, 1100);
+  g.strokeStyle = '#111'; g.lineWidth = 9; g.lineCap = g.lineJoin = 'round';
+  const leaf = (x, y, a, L) => { g.save(); g.translate(x, y); g.rotate(a); g.beginPath();
+    g.moveTo(0, 0); g.bezierCurveTo(L * .35, -L * .28, L * .75, -L * .2, L, 0); g.bezierCurveTo(L * .75, L * .2, L * .35, L * .28, 0, 0);
+    g.moveTo(0, 0); g.lineTo(L * .9, 0); g.stroke(); g.restore(); };
+  g.beginPath(); g.moveTo(450, 1060); g.bezierCurveTo(430, 800, 480, 600, 450, 330); g.stroke();
+  [[448, 900, -2.6, 230], [452, 840, -.5, 250], [446, 720, -2.7, 210], [455, 650, -.4, 220], [450, 520, -2.5, 170], [452, 470, -.6, 170]]
+    .forEach(a => leaf(...a));
+  for (let i = 0; i < 9; i++) { const a = i / 9 * Math.PI * 2; g.save(); g.translate(450, 250); g.rotate(a);
+    g.beginPath(); g.moveTo(0, 0); g.bezierCurveTo(-70, -60, -45, -190, 0, -210); g.bezierCurveTo(45, -190, 70, -60, 0, 0); g.stroke(); g.restore(); }
+  g.beginPath(); g.arc(450, 250, 46, 0, 7); g.stroke();
+  for (let i = 0; i < 14; i++) { const a = i / 14 * 7; g.beginPath(); g.arc(450 + Math.cos(a) * 24, 250 + Math.sin(a) * 24, 5, 0, 7); g.stroke(); }
+  return c;
+}
+function sampleMountain(){
+  const c = document.createElement('canvas'); c.width = 1200; c.height = 850; const g = c.getContext('2d');
+  let gr = g.createLinearGradient(0, 0, 0, 500); gr.addColorStop(0, '#6aa6d8'); gr.addColorStop(1, '#d8ecf5'); g.fillStyle = gr; g.fillRect(0, 0, 1200, 850);
+  g.fillStyle = 'rgba(255,255,255,.85)'; [[220, 120, 90], [300, 110, 70], [820, 90, 80], [900, 105, 60]].forEach(([x, y, r]) => { g.beginPath(); g.ellipse(x, y, r, r * .4, 0, 0, 7); g.fill(); });
+  const mount = (pts, col) => { g.fillStyle = col; g.beginPath(); g.moveTo(pts[0], 850); for (let i = 0; i < pts.length; i += 2) g.lineTo(pts[i], pts[i + 1]); g.lineTo(pts[pts.length - 2], 850); g.fill(); };
+  mount([0, 520, 180, 430, 380, 360, 560, 170, 640, 230, 760, 300, 960, 380, 1200, 460], '#8d8a86');
+  g.fillStyle = '#b9b5ae'; g.beginPath(); g.moveTo(560, 170); g.lineTo(640, 230); g.lineTo(600, 420); g.lineTo(520, 300); g.fill();
+  g.fillStyle = '#f3f3f0'; g.beginPath(); g.moveTo(560, 170); g.lineTo(600, 200); g.lineTo(575, 235); g.lineTo(540, 215); g.fill();
+  mount([0, 600, 260, 520, 520, 580, 800, 520, 1200, 560], '#7fa35a');
+  mount([0, 690, 300, 640, 640, 690, 960, 630, 1200, 670], '#5c8a3f');
+  for (let i = 0; i < 22; i++) { const x = 40 + i * 54 + (i % 3) * 9, y = 700 + (i % 4) * 22; g.fillStyle = '#2f5a2a';
+    g.beginPath(); g.moveTo(x, y - 46); g.lineTo(x + 18, y); g.lineTo(x - 18, y); g.fill(); }
+  return c;
+}
+function sampleMandala(){
+  const c = document.createElement('canvas'); c.width = 1000; c.height = 1000; const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 1000, 1000); g.strokeStyle = '#111'; g.lineWidth = 7; g.translate(500, 500);
+  [60, 150, 260, 380, 450].forEach(r => { g.beginPath(); g.arc(0, 0, r, 0, 7); g.stroke(); });
+  const ring = (n, r0, r1, w) => { for (let i = 0; i < n; i++) { g.save(); g.rotate(i / n * Math.PI * 2); g.beginPath();
+    g.moveTo(0, -r0); g.bezierCurveTo(w, -(r0 + r1) / 2, w * .4, -r1, 0, -r1); g.bezierCurveTo(-w * .4, -r1, -w, -(r0 + r1) / 2, 0, -r0); g.stroke(); g.restore(); } };
+  ring(8, 60, 150, 50); ring(12, 150, 260, 60); ring(16, 260, 380, 55); ring(24, 380, 450, 30);
+  for (let i = 0; i < 24; i++) { const a = i / 24 * 7; g.beginPath(); g.arc(Math.cos(a) * 470, Math.sin(a) * 470, 10, 0, 7); g.stroke(); }
+  return c;
+}
+addArt('Botanical', sampleBotanical()); addArt('Mountain', sampleMountain()); addArt('Mandala', sampleMandala());
+
+function prep(a){
+  if (a.W) return;
+  const w = a.src.naturalWidth || a.src.width, h = a.src.naturalHeight || a.src.height, k = Math.min(1, 1024 / Math.max(w, h));
+  a.W = Math.max(2, Math.round(w * k)); a.H = Math.max(2, Math.round(h * k));
+}
+function outlineOf(a){
+  if (a.outline) return a.outline;
+  const { W, H } = a, t = document.createElement('canvas'); t.width = W; t.height = H;
+  const c = t.getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, W, H); c.drawImage(a.src, 0, 0, W, H);
+  const d = c.getImageData(0, 0, W, H).data, g = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) g[i] = d[i * 4] * .299 + d[i * 4 + 1] * .587 + d[i * 4 + 2] * .114;
+  const b = Float32Array.from(g);
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { let s = 0;
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) s += g[(y + j) * W + x + i]; b[y * W + x] = s / 9; }
+  const out = c.createImageData(W, H), o = out.data, T = 55;
+  for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 2; x++) { const p = y * W + x;
+    const gx = -b[p - W - 1] - 2 * b[p - 1] - b[p + W - 1] + b[p - W + 1] + 2 * b[p + 1] + b[p + W + 1];
+    const gy = -b[p - W - 1] - 2 * b[p - W] - b[p - W + 1] + b[p + W - 1] + 2 * b[p + W] + b[p + W + 1];
+    const m = Math.sqrt(gx * gx + gy * gy) / 4;
+    if (m > T) { const q = p * 4; o[q] = o[q + 1] = o[q + 2] = 15; o[q + 3] = Math.min(255, (m - T) * 6 + 140); } }
+  return a.outline = out;
+}
+
+/* ================= landing page ================= */
+function renderThumbs(){
+  $('thumbs').innerHTML = '';
+  arts.forEach((a, i) => { const c = document.createElement('canvas'); c.width = 192; c.height = 144; const g = c.getContext('2d');
+    const w = a.src.naturalWidth || a.src.width, h = a.src.naturalHeight || a.src.height, k = Math.min(192 / w, 144 / h);
+    g.drawImage(a.src, (192 - w * k) / 2, (144 - h * k) / 2, w * k, h * k);
+    c.title = a.name; if (i === S.idx) c.className = 'on'; c.onclick = () => { S.idx = i; renderThumbs(); };
+    $('thumbs').appendChild(c); });
+}
+renderThumbs();
+$('file').onchange = e => {
+  [...e.target.files].forEach(f => { const img = new Image();
+    img.onload = () => { addArt(f.name.replace(/\.[^.]+$/, '').slice(0, 18), img); S.idx = arts.length - 1; renderThumbs(); };
+    img.src = URL.createObjectURL(f); });
+  e.target.value = '';
+};
+
+/* ================= three.js scene ================= */
+const canvas = $('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, .01, 50);
+camera.position.set(0, 1.6, 0);
+scene.add(new THREE.HemisphereLight('#ffffff', '#888888', 2));
+
+// artwork: pivot (position + wall orientation) -> mesh (roll, scale)
+const pivot = new THREE.Group(); scene.add(pivot);
+const artMat = new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false });
+const art = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), artMat); pivot.add(art);
+const frameGeo = new THREE.BufferGeometry().setFromPoints([[-.5, -.5], [.5, -.5], [.5, .5], [-.5, .5], [-.5, -.5]].map(([x, y]) => new THREE.Vector3(x, y, .001)));
+const frame = new THREE.Line(frameGeo, new THREE.LineBasicMaterial({ color: '#ff5a36' })); art.add(frame);
+let artTex = null;
+
+function renderArt(){
+  const a = arts[S.idx]; prep(a);
+  const c = document.createElement('canvas'); c.width = a.W; c.height = a.H; const g = c.getContext('2d');
+  if (S.outline) g.putImageData(outlineOf(a), 0, 0); else g.drawImage(a.src, 0, 0, a.W, a.H);
+  if (S.grid) { g.strokeStyle = 'rgba(255,90,54,.9)'; g.lineWidth = Math.max(2, a.W / 300);
+    for (let i = 1; i < 8; i++) { g.beginPath(); g.moveTo(a.W * i / 8, 0); g.lineTo(a.W * i / 8, a.H); g.moveTo(0, a.H * i / 8); g.lineTo(a.W, a.H * i / 8); g.stroke(); } }
+  if (artTex) artTex.dispose();
+  artTex = new THREE.CanvasTexture(c); artTex.colorSpace = THREE.SRGBColorSpace;
+  artMat.map = artTex; artMat.needsUpdate = true;
+  applyLook();
+}
+function applyLook(){
+  const a = arts[S.idx];
+  art.scale.set(S.size * (a.W / a.H) * S.ax * (S.flip ? -1 : 1), S.size * S.ay, 1);
+  art.rotation.z = S.roll;
+  artMat.opacity = S.opacity;
+  pivot.visible = !S.hidden;
+  frame.visible = !S.pinned;
+  menuDirty = true;
+}
+
+/* ================= hand menu ================= */
+const MW = 1024, MH = 900;
+const mCanvas = document.createElement('canvas'); mCanvas.width = MW; mCanvas.height = MH;
+const mg = mCanvas.getContext('2d');
+const mTex = new THREE.CanvasTexture(mCanvas); mTex.colorSpace = THREE.SRGBColorSpace;
+const menu = new THREE.Mesh(new THREE.PlaneGeometry(.32, .32 * MH / MW), new THREE.MeshBasicMaterial({ map: mTex, transparent: true }));
+const cols = [40, 372, 704], rows = [190, 310, 430, 550, 670], BW = 280, BH = 96;
+const BTN = [
+  ['prev', 0, 0, '< Prev'], ['name', 1, 0, ''], ['next', 2, 0, 'Next >'],
+  ['op-', 0, 1, 'Fade -'], ['opv', 1, 1, ''], ['op+', 2, 1, 'Fade +'],
+  ['outline', 0, 2, 'Outline'], ['grid', 1, 2, 'Grid'], ['flip', 2, 2, 'Flip'],
+  ['size-', 0, 3, 'Size -'], ['size+', 1, 3, 'Size +'], ['reset', 2, 3, 'Reset'],
+  ['pin', 0, 4, 'Pin'], ['hide', 1, 4, 'Hide'], ['exit', 2, 4, 'Exit']
+].map(([id, c, r, label]) => ({ id, label, x: cols[c], y: rows[r], w: BW, h: BH }));
+let hover = null, menuDirty = true;
+
+function drawMenu(){
+  menuDirty = false;
+  mg.clearRect(0, 0, MW, MH);
+  mg.fillStyle = 'rgba(18,19,24,.92)'; mg.beginPath(); mg.roundRect(0, 0, MW, MH, 48); mg.fill();
+  mg.fillStyle = '#ff5a36'; mg.fillRect(40, 54, 44, 44);
+  mg.fillStyle = '#fff'; mg.font = '700 52px system-ui,sans-serif'; mg.textBaseline = 'middle'; mg.fillText('TraceLens XR', 104, 78);
+  mg.font = '600 34px system-ui,sans-serif'; mg.fillStyle = S.pinned ? '#7fe0a0' : '#ffd08a';
+  mg.fillText(S.pinned ? 'PINNED - locked in place' : 'FREE - ' + S.msg, 40, 144);
+  for (const b of BTN) {
+    const active = (b.id === 'outline' && S.outline) || (b.id === 'grid' && S.grid) || (b.id === 'flip' && S.flip) ||
+                   (b.id === 'pin' && S.pinned) || (b.id === 'hide' && S.hidden);
+    const info = b.id === 'name' || b.id === 'opv';
+    mg.fillStyle = info ? 'rgba(255,255,255,.06)' : active ? '#ff5a36' : b.id === hover ? 'rgba(255,255,255,.32)' : 'rgba(255,255,255,.14)';
+    mg.beginPath(); mg.roundRect(b.x, b.y, b.w, b.h, 24); mg.fill();
+    let t = b.label;
+    if (b.id === 'name') t = arts[S.idx].name;
+    if (b.id === 'opv') t = Math.round(S.opacity * 100) + '%';
+    if (b.id === 'pin' && S.pinned) t = 'Unpin';
+    if (b.id === 'hide' && S.hidden) t = 'Show';
+    mg.fillStyle = '#fff'; mg.font = '600 40px system-ui,sans-serif'; mg.textAlign = 'center';
+    mg.fillText(t, b.x + b.w / 2, b.y + b.h / 2 + 2, b.w - 20); mg.textAlign = 'left';
+  }
+  mg.fillStyle = 'rgba(255,255,255,.6)'; mg.font = '30px system-ui,sans-serif';
+  mg.fillText('Trigger: place / press   Grip: move   Both grips: scale', 40, 806);
+  mg.fillText('A: pin   B: hide   X: outline   Y: next image', 40, 852);
+  mTex.needsUpdate = true;
+}
+
+function press(id){
+  const n = arts.length;
+  switch (id) {
+    case 'prev': S.idx = (S.idx - 1 + n) % n; renderArt(); break;
+    case 'next': S.idx = (S.idx + 1) % n; renderArt(); break;
+    case 'op-': S.opacity = Math.max(.1, S.opacity - .1); applyLook(); break;
+    case 'op+': S.opacity = Math.min(1, S.opacity + .1); applyLook(); break;
+    case 'outline': S.outline = !S.outline; renderArt(); break;
+    case 'grid': S.grid = !S.grid; renderArt(); break;
+    case 'flip': S.flip = !S.flip; applyLook(); break;
+    case 'size-': if (!S.pinned) { S.size = Math.max(.1, S.size / 1.15); applyLook(); } break;
+    case 'size+': if (!S.pinned) { S.size = Math.min(5, S.size * 1.15); applyLook(); } break;
+    case 'reset': if (!S.pinned) { Object.assign(S, { size: .7, ax: 1, ay: 1, roll: 0 }); applyLook(); } break;
+    case 'pin': S.pinned = !S.pinned; S.msg = 'Point at a wall and pull the trigger'; applyLook(); break;
+    case 'hide': S.hidden = !S.hidden; applyLook(); break;
+    case 'exit': renderer.xr.getSession()?.end(); break;
+  }
+  menuDirty = true;
+}
+
+/* ================= placement helpers ================= */
+const V = () => new THREE.Vector3();
+function placeOnSurface(matrixArray){
+  const m = new THREE.Matrix4().fromArray(matrixArray);
+  const pos = V().setFromMatrixPosition(m);
+  const q = new THREE.Quaternion().setFromRotationMatrix(m);
+  const normal = V().set(0, 1, 0).applyQuaternion(q).normalize();
+  let up;
+  if (Math.abs(normal.y) < .75) up = V().set(0, 1, 0);           // wall: keep picture upright
+  else { const cam = V(); camera.getWorldDirection(cam); up = cam.projectOnPlane(normal).normalize(); // table: top faces away
+    if (up.lengthSq() < 1e-4) up.set(0, 0, -1); }
+  const x = V().crossVectors(up, normal).normalize(), y = V().crossVectors(normal, x).normalize();
+  pivot.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, normal));
+  pivot.position.copy(pos).addScaledVector(normal, .004);
+  S.msg = 'Placed! Press A to pin'; menuDirty = true;
+}
+function placeInFront(origin, dir, dist = 1.5){
+  const xrCam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
+  pivot.position.copy(origin).addScaledVector(dir, dist);
+  const camPos = V().setFromMatrixPosition(xrCam.matrixWorld);
+  pivot.lookAt(camPos.x, pivot.position.y, camPos.z);
+  S.msg = 'No wall found - placed in the air'; menuDirty = true;
+}
+
+/* ================= controllers ================= */
+const reticle = new THREE.Mesh(new THREE.RingGeometry(.03, .045, 32), new THREE.MeshBasicMaterial({ color: '#ff5a36', side: THREE.DoubleSide }));
+reticle.visible = false; scene.add(reticle);
+const factory = new XRControllerModelFactory();
+const ctrls = [0, 1].map(i => {
+  const c = renderer.xr.getController(i), grip = renderer.xr.getControllerGrip(i);
+  grip.add(factory.createControllerModel(grip)); scene.add(c, grip);
+  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V(), V().set(0, 0, -1)]), new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: .8 }));
+  line.visible = false; c.add(line);
+  c.userData = { hand: null, src: null, hitSource: null, hit: null, line, prev: [], gripping: false };
+  c.addEventListener('connected', e => {
+    const u = c.userData; u.src = e.data; u.hand = e.data.handedness;
+    if (u.hand === 'right') line.visible = true;
+    if (u.hand === 'left') { menu.position.set(0, .13, -.08); menu.rotation.set(-.45, 0, 0); c.add(menu); menu.visible = S.menu; }
+    const session = renderer.xr.getSession();
+    if (session && session.requestHitTestSource) {
+      session.requestHitTestSource({ space: e.data.targetRaySpace, entityTypes: ['plane', 'mesh'] })
+        .catch(() => session.requestHitTestSource({ space: e.data.targetRaySpace }))
+        .then(s => { u.hitSource = s; }).catch(() => {});
+    }
+  });
+  c.addEventListener('disconnected', () => { const u = c.userData; u.hitSource?.cancel?.(); Object.assign(u, { hand: null, src: null, hitSource: null, hit: null }); line.visible = false; if (menu.parent === c) c.remove(menu); });
+  c.addEventListener('selectstart', () => onTrigger(c));
+  c.addEventListener('squeezestart', () => onGrip(c, true));
+  c.addEventListener('squeezeend', () => onGrip(c, false));
+  return c;
+});
+const right = () => ctrls.find(c => c.userData.hand === 'right') || ctrls.find(c => c.userData.hand);
+
+const ray = new THREE.Raycaster(), rotM = new THREE.Matrix4();
+function aim(c){
+  rotM.identity().extractRotation(c.matrixWorld);
+  ray.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  ray.ray.direction.set(0, 0, -1).applyMatrix4(rotM);
+  return ray;
+}
+function menuButtonAt(r){
+  if (!menu.visible || !menu.parent) return null;
+  const hit = r.intersectObject(menu)[0]; if (!hit) return null;
+  const px = hit.uv.x * MW, py = (1 - hit.uv.y) * MH;
+  const b = BTN.find(b => px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h && b.id !== 'name' && b.id !== 'opv');
+  return { id: b ? b.id : null, dist: hit.distance };
+}
+function onTrigger(c){
+  if (c.userData.hand === 'left') return;
+  const r = aim(c), m = menuButtonAt(r);
+  if (m) { if (m.id) press(m.id); return; }
+  if (S.pinned) { S.msg = ''; menuDirty = true; return; }
+  if (c.userData.hit) placeOnSurface(c.userData.hit); else placeInFront(r.ray.origin, r.ray.direction);
+  S.hidden = false; applyLook();
+}
+
+// grip: one hand moves, two hands scale
+let twoHand = null;
+function onGrip(c, down){
+  c.userData.gripping = down;
+  const held = ctrls.filter(k => k.userData.gripping);
+  if (S.pinned) { if (down) { S.msg = ''; menuDirty = true; } return; }
+  scene.attach(pivot); twoHand = null;
+  if (held.length === 1) held[0].attach(pivot);
+  if (held.length === 2) twoHand = { d0: held[0].position.distanceTo(held[1].position), s0: S.size };
+}
+
+function poll(dt){
+  for (const c of ctrls) {
+    const u = c.userData, gp = u.src && u.src.gamepad; if (!gp) continue;
+    const b = gp.buttons.map(x => x.pressed), was = u.prev;
+    const tap = i => b[i] && !was[i];
+    const sx = gp.axes[2] || 0, sy = gp.axes[3] || 0;
+    if (u.hand === 'right') {
+      if (tap(4)) press('pin');
+      if (tap(5)) press('hide');
+      if (Math.abs(sy) > .2) { S.opacity = THREE.MathUtils.clamp(S.opacity - sy * dt * .8, .1, 1); applyLook(); }
+      if (Math.abs(sx) > .2 && !S.pinned) { S.roll -= sx * dt * 1.2; applyLook(); }
+    } else if (u.hand === 'left') {
+      if (tap(4)) press('outline');
+      if (tap(5)) press('next');
+      if (tap(3)) { S.menu = !S.menu; menu.visible = S.menu; }
+      if (!S.pinned && Math.abs(sx) > .2) { S.ax = THREE.MathUtils.clamp(S.ax * (1 + sx * dt * .8), .3, 3); applyLook(); }
+      if (!S.pinned && Math.abs(sy) > .2) { S.ay = THREE.MathUtils.clamp(S.ay * (1 - sy * dt * .8), .3, 3); applyLook(); }
+    }
+    u.prev = b;
+  }
+}
+
+/* ================= main loop ================= */
+const clock = new THREE.Clock();
+renderer.setAnimationLoop((t, frame) => {
+  const dt = Math.min(clock.getDelta(), .05);
+  if (frame) {
+    const ref = renderer.xr.getReferenceSpace();
+    for (const c of ctrls) { const u = c.userData;
+      if (u.hitSource) { const res = frame.getHitTestResults(u.hitSource); u.hit = res.length ? res[0].getPose(ref).transform.matrix : null; } }
+    if (needPlace) { needPlace = false; const cam = renderer.xr.getCamera(); const o = V().setFromMatrixPosition(cam.matrixWorld);
+      const d = V(); cam.getWorldDirection(d); d.y = 0; d.normalize(); placeInFront(o, d, 1.4); S.msg = 'Point at a wall and pull the trigger'; }
+    poll(dt);
+    if (twoHand) { const held = ctrls.filter(k => k.userData.gripping);
+      if (held.length === 2) { S.size = THREE.MathUtils.clamp(twoHand.s0 * held[0].position.distanceTo(held[1].position) / twoHand.d0, .1, 6); applyLook(); } }
+    // pointer: menu hover, reticle, ray length
+    const rc = right(); reticle.visible = false;
+    if (rc) { const r = aim(rc), m = menuButtonAt(r), id = m ? m.id : null;
+      if (id !== hover) { hover = id; menuDirty = true; }
+      let len = 3;
+      if (m) len = m.dist;
+      else if (rc.userData.hit && !S.pinned) { const hm = new THREE.Matrix4().fromArray(rc.userData.hit);
+        reticle.position.setFromMatrixPosition(hm); reticle.quaternion.setFromRotationMatrix(hm); reticle.rotateX(-Math.PI / 2);
+        reticle.visible = true; len = reticle.position.distanceTo(r.ray.origin); }
+      rc.userData.line.scale.z = len; }
+  }
+  if (menuDirty) drawMenu();
+  renderer.render(scene, camera);
+});
+
+/* ================= start / preview ================= */
+let needPlace = false;
+function showScene(on){ $('home').style.display = on ? 'none' : ''; canvas.style.display = on ? 'block' : 'none'; $('back').style.display = on && !renderer.xr.isPresenting ? 'block' : 'none'; }
+async function startAR(){
+  $('note').textContent = '';
+  try {
+    const session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local-floor'], optionalFeatures: ['hit-test', 'plane-detection', 'anchors'] });
+    scene.background = null; renderArt();
+    await renderer.xr.setSession(session);
+    needPlace = true; showScene(true);
+    session.addEventListener('end', () => showScene(false));
+  } catch (err) {
+    $('note').textContent = 'Could not start AR: ' + (err.message || err) + '. Open this page in the Meta Quest Browser.';
+  }
+}
+$('enter').onclick = startAR;
+$('preview').onclick = () => {
+  scene.background = new THREE.Color('#c9c4bb');
+  renderArt(); pivot.position.set(0, 1.55, -1.6); pivot.rotation.set(0, 0, 0);
+  menu.position.set(-.55, 1.35, -1); menu.rotation.set(0, .45, 0); scene.add(menu); menu.visible = true;
+  showScene(true);
+};
+$('back').onclick = () => showScene(false);
+canvas.addEventListener('click', e => {           // preview: click menu buttons with the mouse
+  if (renderer.xr.isPresenting) return;
+  ray.setFromCamera(new THREE.Vector2(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+  const m = menuButtonAt(ray); if (m && m.id) press(m.id);
+});
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+if (navigator.xr) navigator.xr.isSessionSupported('immersive-ar').then(ok => { if (!ok) $('note').textContent = 'AR is not available here. Open this page in the Meta Quest Browser to use passthrough. You can still try Preview on screen.'; });
+else $('note').textContent = 'WebXR not available in this browser. Open this page in the Meta Quest Browser. You can still try Preview on screen.';
+</script>
+</body>
+</html>
